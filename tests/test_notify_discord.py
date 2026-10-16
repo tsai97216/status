@@ -165,6 +165,58 @@ class DiscordAlertTests(unittest.TestCase):
         self.assertNotIn("@here", json.dumps(message, ensure_ascii=False))
 
 
+    def test_more_than_ten_events_are_sent_in_batches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "status.json"
+            state_path = Path(directory) / "alert-state.json"
+            items = [
+                {"name": f"demo-{i}", "status": "failure",
+                 "business": {"business_status": "failure", "business_label": "異常"}}
+                for i in range(12)
+            ]
+            status_path.write_text(json.dumps({"repositories": items}), encoding="utf-8")
+            state_path.write_text(json.dumps({"active_failures": {}}) + "\n", encoding="utf-8")
+
+            with (
+                patch.object(notify_discord, "STATUS_PATH", status_path),
+                patch.object(notify_discord, "STATE_PATH", state_path),
+                patch.dict(os.environ, {"DISCORD_WEBHOOK_URL": "https://discord.example/webhook"}),
+                patch.object(notify_discord, "post_discord", return_value={"http_status": 200}) as post,
+            ):
+                self.assertEqual(notify_discord.main(), 0)
+
+            self.assertEqual([len(call.args[1]["embeds"]) for call in post.call_args_list], [10, 2])
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(saved["active_failures"]), 12)
+
+    def test_partial_batch_failure_does_not_advance_alert_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "status.json"
+            state_path = Path(directory) / "alert-state.json"
+            items = [
+                {"name": f"demo-{i}", "status": "failure",
+                 "business": {"business_status": "failure", "business_label": "異常"}}
+                for i in range(12)
+            ]
+            status_path.write_text(json.dumps({"repositories": items}), encoding="utf-8")
+            original_state = json.dumps({"active_failures": {}}) + "\n"
+            state_path.write_text(original_state, encoding="utf-8")
+
+            with (
+                patch.object(notify_discord, "STATUS_PATH", status_path),
+                patch.object(notify_discord, "STATE_PATH", state_path),
+                patch.dict(os.environ, {"DISCORD_WEBHOOK_URL": "https://discord.example/webhook"}),
+                patch.object(
+                    notify_discord, "post_discord",
+                    side_effect=[{"http_status": 200}, RuntimeError("temporary delivery error")],
+                ) as post,
+            ):
+                self.assertEqual(notify_discord.main(), 1)
+
+            self.assertEqual(post.call_count, 2)
+            self.assertEqual(state_path.read_text(encoding="utf-8"), original_state)
+
+
 class VpsAggregationTests(unittest.TestCase):
     @patch("update_status.health_check")
     def test_two_http_200_endpoints_are_enough_for_vps_success(self, mock_health_check):

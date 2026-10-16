@@ -130,10 +130,10 @@ def build_message(new_failures, recovered):
 
     payload = {
         "content": "Chi Status｜監控事件通知",
-        "embeds": embeds[:10],
+        "embeds": embeds,
     }
     if len(embeds) > 10:
-        payload["content"] += f"（本次共 {len(embeds)} 件事件，Embed 顯示前 10 件）"
+        payload["content"] += f"（本次共 {len(embeds)} 件事件，將分批傳送）"
     return payload
 
 
@@ -203,19 +203,30 @@ def main():
         return 0
 
     message = build_message(new_failures, recovered)
+    embeds = message.get("embeds", [])
+    batches = [
+        {**message, "embeds": embeds[offset:offset + 10]}
+        for offset in range(0, len(embeds), 10)
+    ]
+    deliveries = []
     try:
-        delivery = post_discord(webhook_url, message)
+        for index, batch in enumerate(batches, start=1):
+            delivery = post_discord(webhook_url, batch)
+            deliveries.append(delivery if isinstance(delivery, dict) else {})
+            print(f"Discord 通知批次已送達：{index}/{len(batches)}。")
     except Exception as exc:
-        # Do not advance the state on delivery failure. The next scheduled run retries.
+        # Keep the old state until every batch succeeds. If a later batch fails,
+        # an earlier batch may be repeated on retry, but no incident is silently dropped.
         print(f"Discord 通知傳送失敗，保留告警狀態供下次重試：{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
     STATE_PATH.write_text(json.dumps({"active_failures": next_active}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    delivery = delivery if isinstance(delivery, dict) else {}
+    last_delivery = deliveries[-1] if deliveries else {}
     print(
-        f"Discord Webhook 已接受訊息：HTTP {delivery.get('http_status', '2xx')}；"
-        f"message_id={delivery.get('id', '未回傳')}；"
-        f"channel_id={delivery.get('channel_id', '未回傳')}。"
+        f"Discord Webhook 已接受全部 {len(deliveries)} 批訊息；"
+        f"最後一批 HTTP {last_delivery.get('http_status', '2xx')}；"
+        f"message_id={last_delivery.get('id', '未回傳')}；"
+        f"channel_id={last_delivery.get('channel_id', '未回傳')}。"
     )
     print(f"Discord 通知已送出：新異常 {len(new_failures)}，恢復 {len(recovered)}。")
     return 0

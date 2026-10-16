@@ -4,13 +4,19 @@ on:
   pull_request:
     paths:
       - "worker/**"
+      - "scripts/**"
+      - "tests/**"
       - ".github/workflows/deploy-trigger-worker.yml"
       - ".github/workflows/worker-tests.yml"
+      - ".github/workflows/update-status.yml"
   push:
     branches: [main]
     paths:
       - "worker/**"
+      - "scripts/**"
+      - "tests/**"
       - ".github/workflows/worker-tests.yml"
+      - ".github/workflows/update-status.yml"
   workflow_dispatch:
 
 permissions:
@@ -35,6 +41,14 @@ jobs:
 
       - name: Test Worker authorization and dispatch
         run: node --experimental-default-type=module --test worker/index.test.mjs
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test status collection and Discord alerts
+        run: python -m unittest discover -s tests -v
 
       - name: Validate Wrangler configuration and bundle
         run: npx --yes wrangler@4 deploy --dry-run --config worker/wrangler.toml
