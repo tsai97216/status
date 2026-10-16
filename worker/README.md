@@ -21,7 +21,21 @@ After a successful run, open the workflow run's **Summary** to see the workers.d
 
 ## 3. Connect the control panel
 
-The Worker URL is configured in actions.html (`API_URL`). Open https://status.chi.qzz.io/actions.html, enter the STATUS_TRIGGER_SECRET, and use the controls to trigger a workflow from the status dashboard's project list. The key is stored in that browser's local storage; use **清除授權金鑰** to remove it.
+The Worker URL is configured in actions.html (`API_URL`). Until Chi Auth SSO is deployed and configured, open https://status.chi.qzz.io/actions.html, enter the `STATUS_TRIGGER_SECRET`, and use the controls to trigger a workflow. The legacy key is stored in that browser's local storage; use **清除授權金鑰** to remove it.
+
+## 4. Shared Chi Passkey SSO (prepared, not yet enabled)
+
+The Worker can additionally accept a short-lived Chi Auth bearer token and validates it server-side against `https://chi.qzz.io/auth/api/userinfo`. A supplied but invalid bearer token is rejected; it never falls back to the legacy key. If Chi Auth is unavailable, the Worker fails closed.
+
+To enable the UI after the Chi Auth foundation is deployed:
+
+1. Register this exact callback URI in the Chi Auth client registry: `https://status.chi.qzz.io/actions.html?auth_callback=1`.
+2. Set the same generated client ID as the non-secret Worker variable `CHI_AUTH_STATUS_CLIENT_ID` in the Cloudflare Worker configuration.
+3. Copy the generated client ID into `AUTH_CLIENT_ID` in `actions.html`.
+4. Deploy the updated Actions page and verify the authorization-code + PKCE flow on a real browser.
+5. Confirm the Worker validates the token for this exact client, then test catalog loading and a safe workflow trigger before considering removal of the legacy secret.
+
+The Passkey button remains disabled while `AUTH_CLIENT_ID` is blank. The short-lived access token stays in memory; PKCE state and verifier are kept in sessionStorage only for the sign-in round-trip. The legacy trigger secret remains available as a fallback until end-to-end tests and recovery procedures are complete.
 
 ## Project scope and safety
 

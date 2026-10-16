@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import worker from "./index.js";
@@ -6,14 +7,16 @@ const allowRateLimit = { async limit() { return { success: true }; } };
 const env = {
   GITHUB_TOKEN: "test-token",
   TRIGGER_SECRET: "test-secret",
+  CHI_AUTH_STATUS_CLIENT_ID: "test-status-client-id",
   IP_RATE_LIMITER: allowRateLimit,
   DISPATCH_RATE_LIMITER: allowRateLimit,
 };
 const origin = "https://status.chi.qzz.io";
 
-function request(body, { method = "POST", key = "test-secret", requestOrigin = origin, url = "https://worker.example/" } = {}) {
+function request(body, { method = "POST", key = "test-secret", bearer = "", requestOrigin = origin, url = "https://worker.example/" } = {}) {
   const headers = new Headers({ Origin: requestOrigin, "CF-Connecting-IP": "203.0.113.10" });
   if (key !== null) headers.set("X-Trigger-Key", key);
+  if (bearer) headers.set("Authorization", "Bearer " + bearer);
   if (body !== undefined) headers.set("Content-Type", "application/json");
   return new Request(url, {
     method,
@@ -137,6 +140,7 @@ test("handles CORS preflight without requiring credentials or consuming rate lim
   assert.equal(response.status, 204);
   assert.equal(response.headers.get("Access-Control-Allow-Origin"), origin);
   assert.match(response.headers.get("Access-Control-Allow-Headers") || "", /X-Trigger-Key/);
+  assert.match(response.headers.get("Access-Control-Allow-Headers") || "", /Authorization/);
   assert.equal(ipLimitCalls, 0);
   assert.equal(dispatchLimitCalls, 0);
 });
@@ -186,4 +190,70 @@ test("returns a specific safe error when the GitHub API request times out", asyn
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("accepts a valid Chi Auth token without requiring the legacy trigger secret", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async url => {
+    assert.equal(String(url), "https://chi.qzz.io/auth/api/userinfo?client_id=test-status-client-id");
+    return Response.json({ sub: "chi-owner", name: "Chi Owner", aud: "test-status-client-id" });
+  };
+  try {
+    const response = await worker.fetch(request(undefined, {
+      method: "GET",
+      key: null,
+      bearer: "a".repeat(43),
+      url: "https://worker.example/?action=catalog",
+    }), { ...env, TRIGGER_SECRET: undefined, CHI_AUTH_STATUS_CLIENT_ID: "test-status-client-id" });
+    const result = await jsonResponse(response);
+    assert.equal(response.status, 200);
+    assert.equal(result.body.ok, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("does not fall back to the legacy key when a supplied Chi Auth token is invalid", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: "invalid" }), {
+    status: 401,
+    headers: { "Content-Type": "application/json" },
+  });
+  try {
+    const response = await worker.fetch(request(undefined, {
+      method: "GET",
+      bearer: "a".repeat(43),
+      url: "https://worker.example/?action=catalog",
+    }), env);
+    const result = await jsonResponse(response);
+    assert.equal(response.status, 401);
+    assert.match(result.body.error, /invalid or expired/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fails closed when Chi Auth cannot be reached", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new TypeError("simulated auth outage"); };
+  try {
+    const response = await worker.fetch(request(undefined, {
+      method: "GET",
+      bearer: "a".repeat(43),
+      url: "https://worker.example/?action=catalog",
+    }), env);
+    const result = await jsonResponse(response);
+    assert.equal(response.status, 503);
+    assert.match(result.body.error, /Chi Auth is temporarily unavailable/);
+    assert.doesNotMatch(JSON.stringify(result.body), /simulated auth outage/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Actions console inline JavaScript parses", () => {
+  const html = readFileSync(new URL("../actions.html", import.meta.url), "utf8");
+  const inlineScript = html.match(/<script>([\s\S]*?)<\/script>/);
+  assert.ok(inlineScript, "expected an inline application script");
+  assert.doesNotThrow(() => new Function(inlineScript[1]));
 });

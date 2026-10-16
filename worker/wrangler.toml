@@ -3,6 +3,11 @@ main = "index.js"
 compatibility_date = "2026-10-16"
 workers_dev = true
 
+[vars]
+# Set to the generated Chi Auth client ID after registering the Status callback.
+# Keep blank until Chi Auth is deployed and end-to-end testing is complete.
+CHI_AUTH_STATUS_CLIENT_ID = ""
+
 # Per-IP protection against repeated requests and credential guessing.
 [[ratelimits]]
 name = "IP_RATE_LIMITER"

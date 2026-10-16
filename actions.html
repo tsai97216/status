@@ -22,7 +22,7 @@
 </head>
 <body>
 <main>
-  <header class="top"><div class="brand"><div class="brand-mark"><i data-lucide="workflow" aria-hidden="true"></i></div><div><div class="eyebrow">CHI · STATUS CENTER</div><h1>Actions 控制台</h1><p class="sub">集中管理狀態總覽追蹤的自動化工作流程。</p></div></div><div class="top-actions"><nav class="page-nav" aria-label="Chi Status 導覽"><a href="./">狀態總覽</a><a href="./actions.html" aria-current="page">Actions 控制台</a></nav><div class="header-tools"><button id="themeToggle" type="button" aria-label="切換色彩模式"><span id="themeIcon" class="button-icon" aria-hidden="true"></span><span id="themeLabel">跟隨系統</span></button><button id="reload" type="button"><i class="button-icon" data-lucide="refresh-cw" aria-hidden="true"></i>重新載入清單</button><button id="forget" type="button"><i class="button-icon" data-lucide="key-round" aria-hidden="true"></i>清除授權金鑰</button></div></div></header>
+  <header class="top"><div class="brand"><div class="brand-mark"><i data-lucide="workflow" aria-hidden="true"></i></div><div><div class="eyebrow">CHI · STATUS CENTER</div><h1>Actions 控制台</h1><p class="sub">集中管理狀態總覽追蹤的自動化工作流程。</p></div></div><div class="top-actions"><nav class="page-nav" aria-label="Chi Status 導覽"><a href="./">狀態總覽</a><a href="./actions.html" aria-current="page">Actions 控制台</a></nav><div class="header-tools"><button id="themeToggle" type="button" aria-label="切換色彩模式"><span id="themeIcon" class="button-icon" aria-hidden="true"></span><span id="themeLabel">跟隨系統</span></button><button id="passkeyLogin" type="button" disabled title="待 Chi Auth 部署並註冊 Status 應用後啟用"><i class="button-icon" data-lucide="fingerprint" aria-hidden="true"></i>Passkey 登入</button><button id="legacyLogin" type="button" hidden><i class="button-icon" data-lucide="key-round" aria-hidden="true"></i>使用舊授權金鑰</button><button id="passkeyLogout" type="button" hidden><i class="button-icon" data-lucide="log-out" aria-hidden="true"></i>登出 Passkey</button><button id="reload" type="button"><i class="button-icon" data-lucide="refresh-cw" aria-hidden="true"></i>重新載入清單</button><button id="forget" type="button"><i class="button-icon" data-lucide="key-round" aria-hidden="true"></i>清除授權金鑰</button></div></div></header>
   <section class="hero"><div class="hero-copy"><h2>工作流程</h2><p>執行已核准的 GitHub Actions 工作流程，並查看執行結果。</p></div></section>
   <section class="toolbar"><input id="search" type="search" placeholder="搜尋專案或工作流程…" aria-label="搜尋"><select id="group" aria-label="依類型篩選"><option value="">全部類型</option></select><span id="count" class="hint">讀取中…</span></section>
   <div id="message" role="status" aria-live="polite"></div>
@@ -32,6 +32,13 @@
 <script>
 const API_URL = "https://chi-status-trigger.tsai97216.workers.dev";
 const KEY_STORAGE = "chi-status-trigger-key";
+const AUTH_API_URL = "https://chi.qzz.io/auth/api";
+const AUTH_CLIENT_ID = ""; // Fill after Chi Auth is deployed and Status is registered as a client.
+const AUTH_REDIRECT_URI = "https://status.chi.qzz.io/actions.html?auth_callback=1";
+const AUTH_STATE_STORAGE = "chi-status-sso-state";
+const AUTH_VERIFIER_STORAGE = "chi-status-sso-verifier";
+let authAccessToken = ""; // Keep the short-lived token in memory only.
+let useLegacyKey = false;
 const $ = id => document.getElementById(id);
 let workflows = [];
 let busy = false;
@@ -55,14 +62,24 @@ function getKey() {
 }
 async function api(path, options={}) {
   if (!API_URL) throw new Error("API 網址尚未設定。請先部署 Worker，並把網址填入 actions.html 的 API_URL。");
-  const key = getKey();
-  if (!key) throw new Error("未輸入授權金鑰。");
-  const response = await fetch(API_URL + path, {
-    ...options,
-    headers: { "X-Trigger-Key": key, ...(options.headers || {}) }
-  });
+  const headers = { ...(options.headers || {}) };
+  if (authAccessToken) {
+    headers.Authorization = "Bearer " + authAccessToken;
+  } else {
+    if (AUTH_CLIENT_ID && !useLegacyKey) throw new Error("請先使用 Passkey 登入，或點擊「使用舊授權金鑰」作為備援。");
+    const key = getKey();
+    if (!key) throw new Error("未輸入授權金鑰。");
+    headers["X-Trigger-Key"] = key;
+  }
+  const response = await fetch(API_URL + path, { ...options, headers });
   let data = {};
   try { data = await response.json(); } catch {}
+  if (response.status === 401 && authAccessToken) {
+    authAccessToken = "";
+    $("passkeyLogin").hidden = false;
+    $("passkeyLogout").hidden = true;
+    throw new Error("Passkey 授權已過期，請重新登入。");
+  }
   if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
@@ -275,6 +292,91 @@ themeToggle.addEventListener("click", () => {
 });
 systemTheme.addEventListener("change", () => { if (currentTheme === "system") setTheme("system"); });
 
+function randomBase64Url(size=32) {
+  const bytes = crypto.getRandomValues(new Uint8Array(size));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+","-").replaceAll("/","_").replace(/=+$/g,"");
+}
+async function pkceChallenge(verifier) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  let binary = "";
+  for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+","-").replaceAll("/","_").replace(/=+$/g,"");
+}
+async function startPasskeyLogin() {
+  if (!AUTH_CLIENT_ID) {
+    message("Chi Auth 尚未部署完成或尚未註冊 Status 應用。Passkey 登入暫未啟用，現有授權方式仍可使用。", "warn");
+    return;
+  }
+  try {
+    const verifier = randomBase64Url(32);
+    const state = randomBase64Url(32);
+    sessionStorage.setItem(AUTH_STATE_STORAGE, state);
+    sessionStorage.setItem(AUTH_VERIFIER_STORAGE, verifier);
+    const challenge = await pkceChallenge(verifier);
+    const authorize = new URL(AUTH_API_URL + "/authorize");
+    authorize.searchParams.set("client_id", AUTH_CLIENT_ID);
+    authorize.searchParams.set("redirect_uri", AUTH_REDIRECT_URI);
+    authorize.searchParams.set("response_type", "code");
+    authorize.searchParams.set("code_challenge", challenge);
+    authorize.searchParams.set("code_challenge_method", "S256");
+    authorize.searchParams.set("state", state);
+    location.assign(authorize.toString());
+  } catch (error) {
+    message("無法開始 Passkey 登入：" + error.message, "error");
+  }
+}
+async function initializePasskeySSO() {
+  $("passkeyLogin").disabled = !AUTH_CLIENT_ID;
+  $("passkeyLogin").title = AUTH_CLIENT_ID ? "使用 Chi Passkey 登入" : "待 Chi Auth 部署並註冊 Status 應用後啟用";
+  $("legacyLogin").hidden = !AUTH_CLIENT_ID;
+  const url = new URL(location.href);
+  if (url.searchParams.get("auth_callback") !== "1") return;
+  try {
+    if (!AUTH_CLIENT_ID) throw new Error("Chi Auth 尚未完成部署與 Status 客戶端設定。");
+    const code = url.searchParams.get("code") || "";
+    const state = url.searchParams.get("state") || "";
+    const expectedState = sessionStorage.getItem(AUTH_STATE_STORAGE) || "";
+    const verifier = sessionStorage.getItem(AUTH_VERIFIER_STORAGE) || "";
+    sessionStorage.removeItem(AUTH_STATE_STORAGE);
+    sessionStorage.removeItem(AUTH_VERIFIER_STORAGE);
+    if (!code || !state || !expectedState || state !== expectedState || !verifier) {
+      throw new Error("登入狀態驗證失敗，請重新登入。");
+    }
+    const response = await fetch(AUTH_API_URL + "/token?client_id=" + encodeURIComponent(AUTH_CLIENT_ID), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: AUTH_CLIENT_ID, code, redirect_uri: AUTH_REDIRECT_URI, code_verifier: verifier }),
+      cache: "no-store",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.access_token) throw new Error(data.error || "Passkey 登入失敗。");
+    authAccessToken = data.access_token;
+    useLegacyKey = false;
+    $("passkeyLogin").hidden = true;
+    $("passkeyLogout").hidden = false;
+    message("Chi Passkey 驗證成功。本分頁將使用短效授權，不會把存取權杖寫入 localStorage。", "ok");
+  } catch (error) {
+    message("Passkey 登入未完成：" + error.message, "error");
+  } finally {
+    history.replaceState(null, "", location.pathname);
+  }
+}
+$("passkeyLogin").addEventListener("click", startPasskeyLogin);
+$("passkeyLogout").addEventListener("click", () => {
+  authAccessToken = "";
+  useLegacyKey = false;
+  $("passkeyLogout").hidden = true;
+  $("passkeyLogin").hidden = false;
+  message("已登出 Passkey。請重新登入，或明確選擇舊授權金鑰作為備援。", "ok");
+});
+$("legacyLogin").addEventListener("click", () => {
+  useLegacyKey = true;
+  const key = getKey();
+  if (!key) { message("未輸入舊授權金鑰。", "warn"); return; }
+  load();
+});
 $("reload").addEventListener("click", load);
 $("search").addEventListener("input", render);
 $("group").addEventListener("change", render);
@@ -282,7 +384,7 @@ $("forget").addEventListener("click", () => {
   try { localStorage.removeItem(KEY_STORAGE); } catch {}
   message("已清除此瀏覽器儲存的授權金鑰。", "ok");
 });
-load();
+initializePasskeySSO().finally(load);
 </script>
 </body>
 </html>

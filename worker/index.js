@@ -29,7 +29,7 @@ function json(body, status = 200) {
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, X-Trigger-Key",
+      "Access-Control-Allow-Headers": "Content-Type, X-Trigger-Key, Authorization",
       "Vary": "Origin",
     },
   });
@@ -44,7 +44,7 @@ export default {
       return new Response(null, { status: 204, headers: {
         "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, X-Trigger-Key",
+        "Access-Control-Allow-Headers": "Content-Type, X-Trigger-Key, Authorization",
         "Access-Control-Max-Age": "86400",
         "Vary": "Origin",
       }});
@@ -59,10 +59,26 @@ export default {
     if (ipAllowed === null) return json({ ok: false, error: "Rate limiter is unavailable." }, 503);
     if (!ipAllowed) return json({ ok: false, error: "Too many requests. Please wait and try again." }, 429);
 
-    if (!env.GITHUB_TOKEN || !env.TRIGGER_SECRET) return json({ ok: false, error: "Worker secrets are not configured." }, 503);
+    if (!env.GITHUB_TOKEN) return json({ ok: false, error: "GitHub token is not configured." }, 503);
 
-    const suppliedKey = request.headers.get("X-Trigger-Key") || "";
-    if (!constantTimeEqual(suppliedKey, env.TRIGGER_SECRET)) return json({ ok: false, error: "Invalid trigger key." }, 401);
+    // Prefer the shared Chi Auth Passkey session token. Keep the legacy trigger key
+    // as a deliberate fallback until the central auth service is deployed and tested.
+    const authorization = request.headers.get("Authorization") || "";
+    let authenticated = false;
+    if (authorization) {
+      const match = authorization.match(/^Bearer ([A-Za-z0-9_-]{40,80})$/);
+      if (!match) return json({ ok: false, error: "Invalid Chi Auth access token." }, 401);
+      if (!env.CHI_AUTH_STATUS_CLIENT_ID) return json({ ok: false, error: "Chi Auth Status client is not configured." }, 503);
+      const authResult = await verifyChiAccessToken(match[1], env.CHI_AUTH_STATUS_CLIENT_ID);
+      if (authResult === null) return json({ ok: false, error: "Chi Auth is temporarily unavailable. Please try again." }, 503);
+      if (!authResult) return json({ ok: false, error: "Invalid or expired Chi Auth access token." }, 401);
+      authenticated = true;
+    } else {
+      if (!env.TRIGGER_SECRET) return json({ ok: false, error: "Legacy trigger-key authentication is not configured." }, 503);
+      const suppliedKey = request.headers.get("X-Trigger-Key") || "";
+      authenticated = constantTimeEqual(suppliedKey, env.TRIGGER_SECRET);
+      if (!authenticated) return json({ ok: false, error: "Invalid trigger key." }, 401);
+    }
 
     if (request.method === "GET") {
       const url = new URL(request.url);
@@ -152,6 +168,23 @@ async function checkRateLimit(limiter, key) {
     return result?.success === true;
   } catch (error) {
     console.error("Rate limiter failed", error?.name || "unknown");
+    return null;
+  }
+}
+
+async function verifyChiAccessToken(token, expectedClientId) {
+  try {
+    const endpoint = "https://chi.qzz.io/auth/api/userinfo?client_id=" + encodeURIComponent(expectedClientId);
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: { "Accept": "application/json", "Authorization": `Bearer ${token}` },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) return false;
+    const data = await response.json();
+    return data?.sub === "chi-owner" && data?.aud === expectedClientId;
+  } catch (error) {
+    console.error("Chi Auth validation failed", error?.name || "unknown");
     return null;
   }
 }
