@@ -1,0 +1,79 @@
+name: Deploy Chi Auth Worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-chi-auth
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate deployment configuration and secrets
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CHI_AUTH_SETUP_SECRET: ${{ secrets.CHI_AUTH_SETUP_SECRET }}
+        run: |
+          set -euo pipefail
+          for name in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CHI_AUTH_SETUP_SECRET; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing repository secret: $name"
+              exit 1
+            fi
+          done
+          if grep -q 'REPLACE_WITH_CREATED_D1_DATABASE_ID' auth/wrangler.toml; then
+            echo "::error::Replace the D1 database_id in auth/wrangler.toml before deploying."
+            exit 1
+          fi
+          if ! grep -Eq '^[[:space:]]*routes[[:space:]]*=' auth/wrangler.toml; then
+            echo "::error::Configure the exact chi.qzz.io/auth/* route before deploying. The root site must not be routed to this Worker."
+            exit 1
+          fi
+
+      - name: Install dependencies and run tests
+        working-directory: auth
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+
+      - name: Validate Worker bundle
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --yes wrangler@4 deploy --dry-run --config auth/wrangler.toml
+
+      - name: Apply remote D1 migrations
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --yes wrangler@4 d1 migrations apply chi-auth --remote --config auth/wrangler.toml
+
+      - name: Deploy Chi Auth Worker
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CHI_AUTH_SETUP_SECRET: ${{ secrets.CHI_AUTH_SETUP_SECRET }}
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@4 deploy --config auth/wrangler.toml
+          printf '%s' "$CHI_AUTH_SETUP_SECRET" | npx --yes wrangler@4 secret put CHI_AUTH_SETUP_SECRET --config auth/wrangler.toml
+          {
+            echo "## Chi Auth deployment"
+            echo "Worker deployment completed. Verify https://chi.qzz.io/auth/api/health and test the first Passkey registration before enabling any client."
+            echo "No existing project trigger secrets were changed by this workflow."
+          } >> "$GITHUB_STEP_SUMMARY"

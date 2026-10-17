@@ -1,0 +1,14 @@
+name = "chi-auth"
+main = "index.js"
+compatibility_date = "2026-10-16"
+workers_dev = true
+
+# The Worker is intended to serve only the /auth/* path on chi.qzz.io.
+# Confirm the Cloudflare zone and route before enabling a production route.
+# routes = [{ pattern = "chi.qzz.io/auth/*", zone_name = "qzz.io" }]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "chi-auth"
+database_id = "REPLACE_WITH_CREATED_D1_DATABASE_ID"
+migrations_dir = "migrations"

@@ -1,0 +1,35 @@
+name: Test Chi Auth
+
+on:
+  pull_request:
+    paths:
+      - "auth/**"
+      - ".github/workflows/test-chi-auth.yml"
+  push:
+    branches: [main]
+    paths:
+      - "auth/**"
+      - ".github/workflows/test-chi-auth.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-chi-auth-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: auth
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --no-audit --no-fund
+      - run: npm test
